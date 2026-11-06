@@ -20,8 +20,10 @@ final class OcrService {
                 throw new IllegalStateException("相册 Application 尚未就绪，请稍后重试");
             }
             if (Config.METHOD_PING.equals(method)) {
+                String info = OcrEngine.probe(loader);
+                Diag.s("ping: " + info);
                 out.putBoolean(Config.EXTRA_SUCCESS, true);
-                out.putString(Config.EXTRA_TEXT, OcrEngine.probe(loader));
+                out.putString(Config.EXTRA_TEXT, info);
                 out.putString(Config.EXTRA_SOURCE, "ping");
                 return out;
             }
@@ -38,20 +40,32 @@ final class OcrService {
                     throw new IllegalStateException("无法读取图片：" + path);
                 }
                 source = "image:" + path;
+                Diag.s("已解码图片 " + path + " -> " + bm.getWidth() + "x" + bm.getHeight());
             } else {
-                // 当前屏幕 -> 内存 Bitmap（零临时截图文件）
-                bm = ScreenCapture.capture();
-                source = "screen";
+                // 优先用 shell 端通过内存管道送进来的截图（零文件、无需 root）
+                bm = ScreenInput.take(Config.INPUT_WAIT_MS);
+                if (bm != null) {
+                    source = "screen:pipe";
+                } else {
+                    Diag.s("无管道截图，回退到进程内截屏（可能被权限拒绝）");
+                    bm = ScreenCapture.capture();
+                    source = "screen:app";
+                }
             }
 
+            Diag.s("送入 OCR，Bitmap=" + bm.getWidth() + "x" + bm.getHeight()
+                    + " config=" + bm.getConfig());
             String text = OcrEngine.recognize(loader, ctx, bm);
+            Diag.s("OCR 完成，文本长度=" + (text == null ? 0 : text.length()));
             out.putBoolean(Config.EXTRA_SUCCESS, true);
             out.putString(Config.EXTRA_TEXT, text == null ? "" : text);
             out.putString(Config.EXTRA_SOURCE, source);
         } catch (Throwable t) {
+            String err = describe(t);
+            Diag.s("✗ 提取失败: " + err);
             out.putBoolean(Config.EXTRA_SUCCESS, false);
             out.putString(Config.EXTRA_TEXT, "");
-            out.putString(Config.EXTRA_ERROR, describe(t));
+            out.putString(Config.EXTRA_ERROR, err);
         } finally {
             if (bm != null && !bm.isRecycled()) {
                 bm.recycle();

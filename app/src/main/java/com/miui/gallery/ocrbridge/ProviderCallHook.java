@@ -1,7 +1,10 @@
 package com.miui.gallery.ocrbridge;
 
 import android.content.Context;
+import android.content.res.AssetFileDescriptor;
+import android.net.Uri;
 import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -11,17 +14,21 @@ import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 
 /**
- * 把相册的 ContentProvider.call 变成同步的 OCR 入口。
+ * 把相册的 ContentProvider 变成两个入口：
+ *
+ * 1) call()  —— content call 同步返回识别文本（主入口）
+ * 2) openFile()/openAssetFile() —— content write 把 shell 端截屏写进内存管道
  *
  * 为什么用 content call：
  *   - Provider 是静态注册组件，content call 会自动把相册进程拉起来，不需要常驻服务；
  *   - call() 的返回值会同步打印到 shell，正好用来回传识别出的文字；
- *   - com.miui.gallery.widget 这个 authority 是 exported 且无权限保护，任何 App 都能调。
+ *   - com.miui.gallery.widget 是 exported 且无权限保护的 authority，任何 App 都能调。
  *
- * Hook 基类 android.content.ContentProvider.call（两个重载）已覆盖主 URI
- * （GalleryWidgetOpenProvider 未覆写 call，必走基类）；额外 hook 覆写了 call 的
- * 具体 Provider，让备用 URI 也能命中。method 名通过扫描所有 String 参数定位，
- * 因此不受 3 参数 / 4 参数签名差异影响。
+ * 为什么还要管道：相册是普通 app 进程，没有 READ_FRAME_BUFFER，进程内截全屏会被
+ * SurfaceFlinger 拒绝；从 app 进程 su 提权又会卡在 Magisk 授权。所以截屏改由
+ * shell 进程（有权限）执行，PNG 通过 pipe 直接进相册进程内存，零临时文件。
+ *
+ * method 名通过扫描所有 String 参数定位，不受 3 参数 / 4 参数签名差异影响。
  */
 final class ProviderCallHook {
 
@@ -29,17 +36,19 @@ final class ProviderCallHook {
     }
 
     static void install(XposedModule module, ClassLoader loader, String pkg) {
-        int n = 0;
+        int calls = 0;
+        int pipes = 0;
 
         Class<?> base = Host.find(loader, "android.content.ContentProvider");
-        if (base != null) {
+        if (base == null) {
+            Diag.w(module, "找不到 android.content.ContentProvider", null);
+        } else {
             for (Method m : base.getDeclaredMethods()) {
-                if (isCall(m) && hook(module, m)) {
-                    n++;
+                if (isCall(m) && hookCall(module, m)) {
+                    calls++;
                 }
             }
-        } else {
-            Diag.w(module, "找不到 android.content.ContentProvider", null);
+            pipes += hookInput(module, base);
         }
 
         for (String cn : Config.PROVIDER_CLASSES) {
@@ -48,12 +57,13 @@ final class ProviderCallHook {
                 continue;
             }
             for (Method m : c.getDeclaredMethods()) {
-                if (isCall(m) && hook(module, m)) {
-                    n++;
+                if (isCall(m) && hookCall(module, m)) {
+                    calls++;
                 }
             }
+            pipes += hookInput(module, c);
         }
-        Diag.i(module, pkg + ": ContentProvider.call 入口已装 " + n + " 处");
+        Diag.i(module, pkg + ": call 入口 " + calls + " 处，截图管道 " + pipes + " 处");
     }
 
     private static boolean isCall(Method m) {
@@ -63,7 +73,7 @@ final class ProviderCallHook {
                 && Bundle.class.equals(m.getReturnType());
     }
 
-    private static boolean hook(XposedModule module, Method m) {
+    private static boolean hookCall(XposedModule module, Method m) {
         try {
             module.hook(m)
                     .setPriority(XposedInterface.PRIORITY_HIGHEST)
@@ -88,9 +98,9 @@ final class ProviderCallHook {
                             return chain.proceed();
                         }
 
+                        Diag.s("★ content call 命中 method=" + method);
                         Context ctx = Host.application();
                         ClassLoader loader = ctx != null ? ctx.getClassLoader() : null;
-                        Diag.i(module, "★ content call 命中 method=" + method);
                         if (ctx == null || loader == null) {
                             Bundle err = new Bundle();
                             err.putBoolean(Config.EXTRA_SUCCESS, false);
@@ -99,7 +109,6 @@ final class ProviderCallHook {
                         }
                         return OcrService.handle(loader, ctx, method, extras);
                     });
-            // 只反优化实际 Hook 的方法，防止 ART 内联绕过
             try {
                 module.deoptimize(m);
             } catch (Throwable ignored) {
@@ -110,5 +119,57 @@ final class ProviderCallHook {
             Diag.w(module, "hook " + m.getDeclaringClass().getName() + ".call 失败", t);
             return false;
         }
+    }
+
+    /** Hook openFile/openAssetFile：匹配 ocr_input 时返回内存管道的写端。 */
+    private static int hookInput(XposedModule module, Class<?> c) {
+        int n = 0;
+        for (Method m : c.getDeclaredMethods()) {
+            String name = m.getName();
+            if (!"openFile".equals(name) && !"openAssetFile".equals(name)) {
+                continue;
+            }
+            Class<?> ret = m.getReturnType();
+            final boolean asset = ret == AssetFileDescriptor.class;
+            if (!asset && ret != ParcelFileDescriptor.class) {
+                continue;
+            }
+            try {
+                module.hook(m)
+                        .setPriority(XposedInterface.PRIORITY_HIGHEST)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(chain -> {
+                            Uri uri = null;
+                            try {
+                                for (Object o : chain.getArgs()) {
+                                    if (o instanceof Uri) {
+                                        uri = (Uri) o;
+                                    }
+                                }
+                            } catch (Throwable ignored) {
+                                // ignore
+                            }
+                            if (uri == null || !uri.toString().contains(Config.INPUT_PATH)) {
+                                return chain.proceed();
+                            }
+                            try {
+                                ParcelFileDescriptor pfd = ScreenInput.accept();
+                                return asset ? new AssetFileDescriptor(pfd, 0, -1) : pfd;
+                            } catch (Throwable t) {
+                                Diag.s("截图管道建立失败: " + t);
+                                return chain.proceed();
+                            }
+                        });
+                try {
+                    module.deoptimize(m);
+                } catch (Throwable ignored) {
+                    // ignore
+                }
+                n++;
+            } catch (Throwable t) {
+                Diag.w(module, "hook " + c.getName() + "." + name + " 失败", t);
+            }
+        }
+        return n;
     }
 }

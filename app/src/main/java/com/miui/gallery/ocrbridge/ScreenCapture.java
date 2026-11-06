@@ -1,11 +1,11 @@
 package com.miui.gallery.ocrbridge;
 
+import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Rect;
 import android.hardware.HardwareBuffer;
 import android.util.DisplayMetrics;
-import android.content.res.Resources;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
@@ -13,15 +13,15 @@ import java.lang.reflect.Method;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 内存截屏：把当前屏幕变成 Bitmap 直接交给 OCR，全程不产生临时截图文件。
+ * 进程内截屏（回退通道）：把当前屏幕变成 Bitmap 直接交给 OCR，不产生临时截图文件。
  *
- * 三级回退：
- *   1. 隐藏 API SurfaceControl.captureDisplay / screenshot —— 拿到 Bitmap 或 HardwareBuffer，
- *      不需要任何外部进程，最干净；
- *   2. su -c "screencap -p" —— PNG 输出到 stdout，管道读进内存解码（LSPosed 环境一般有 root）；
- *   3. screencap -p —— 同上但不提权，给个别放宽了截屏权限的 ROM 用。
+ * 注意：相册是普通 app 进程，通常没有 READ_FRAME_BUFFER，这一级大概率会被拒。
+ * 主通道是 {@link ScreenInput}（shell 端截屏 + 内存管道）。这里保留三级回退，
+ * 且每级都打日志、超时只有 3 秒，避免像 v1.0.0 那样一条命令卡 20 秒。
  *
- * 三级都只在内存里流转：byte[] -> Bitmap -> native OCR -> recycle，用完即弃。
+ *   1. 隐藏 API SurfaceControl.captureDisplay / screenshot
+ *   2. su -c "screencap -p"   （PNG 走 stdout 管道读进内存）
+ *   3. screencap -p
  */
 final class ScreenCapture {
 
@@ -32,34 +32,39 @@ final class ScreenCapture {
         Throwable last = null;
 
         try {
+            Diag.s("尝试隐藏 API SurfaceControl 截屏");
             Bitmap bm = viaSurfaceControl();
             if (bm != null) {
+                Diag.s("SurfaceControl 截屏成功");
                 return software(bm);
             }
+            Diag.s("SurfaceControl 未返回 Bitmap");
         } catch (Throwable t) {
+            Diag.s("SurfaceControl 失败: " + t);
             last = t;
         }
 
-        // root 提权的 screencap 优先于不提权的，成功率高得多
         String[][] commands = {
                 {"su", "-c", "screencap -p"},
                 {"screencap", "-p"},
         };
         for (String[] cmd : commands) {
             try {
+                Diag.s("尝试 " + String.join(" ", cmd));
                 Bitmap bm = viaScreencap(cmd);
                 if (bm != null) {
+                    Diag.s("screencap 截屏成功");
                     return software(bm);
                 }
             } catch (Throwable t) {
+                Diag.s("screencap 失败: " + t);
                 last = t;
             }
         }
 
         throw new IllegalStateException(
-                "截屏失败（SurfaceControl / screencap / su 均不可用）。"
-                        + "若设备无 root，请改用 extract_image_text 传入已有图片，"
-                        + "或在 shell 端 screencap -p 到文件后传路径。最后错误："
+                "进程内截屏失败。请改用主命令（shell 端 screencap -p | content write ...），"
+                        + "或用 extract_image_text 传已有图片。最后错误："
                         + (last == null ? "unknown" : last));
     }
 
@@ -80,8 +85,8 @@ final class ScreenCapture {
                     return Bitmap.wrapHardwareBuffer((HardwareBuffer) hb, null);
                 }
             }
-        } catch (Throwable ignored) {
-            // 继续试旧签名
+        } catch (Throwable t) {
+            Diag.s("captureDisplay 不可用: " + t);
         }
 
         DisplayMetrics dm = Resources.getSystem().getDisplayMetrics();
@@ -98,7 +103,7 @@ final class ScreenCapture {
                 return (Bitmap) o;
             }
         } catch (Throwable ignored) {
-            // 继续
+            // 继续试其它签名
         }
 
         // 更旧：screenshot(int width, int height, int rotation)
@@ -113,7 +118,6 @@ final class ScreenCapture {
             // 继续
         }
 
-        // 两参数版
         try {
             Method m = sc.getDeclaredMethod("screenshot", int.class, int.class);
             m.setAccessible(true);
@@ -138,18 +142,19 @@ final class ScreenCapture {
                 bos.write(buf, 0, n);
             }
         }
-        // 读掉 stderr，避免缓冲区写满导致子进程阻塞
         try (InputStream es = p.getErrorStream()) {
             while (es.read(buf) > 0) {
-                // discard
+                // 丢弃 stderr，避免缓冲区写满阻塞子进程
             }
         }
-        if (!p.waitFor(12, TimeUnit.SECONDS)) {
+        if (!p.waitFor(3, TimeUnit.SECONDS)) {
             p.destroyForcibly();
+            throw new IllegalStateException("screencap 超时（3s）");
         }
         byte[] data = bos.toByteArray();
         if (data.length < 128) {
-            throw new IllegalStateException("screencap 无有效输出 (" + cmd[0] + ")");
+            throw new IllegalStateException("screencap 无有效输出 (" + cmd[0]
+                    + ")，多半是权限被拒或 su 未授权");
         }
         Bitmap bm = BitmapFactory.decodeByteArray(data, 0, data.length);
         if (bm == null) {

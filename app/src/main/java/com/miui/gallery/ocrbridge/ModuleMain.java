@@ -27,6 +27,7 @@ public class ModuleMain extends XposedModule {
 
     @Override
     public void onModuleLoaded(ModuleLoadedParam param) {
+        Diag.bind(this);
         processName = param.getProcessName();
         Diag.i(this, "════ 模块载入 ════ 进程=" + processName
                 + " 框架=" + getFrameworkName() + " API=" + getApiVersion()

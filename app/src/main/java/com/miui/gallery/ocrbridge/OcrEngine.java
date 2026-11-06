@@ -27,6 +27,7 @@ final class OcrEngine {
      */
     static String recognize(ClassLoader loader, Context ctx, Bitmap bitmap) throws Throwable {
         Class<?> engineClass = Class.forName(Config.ENGINE_CLASS, false, loader);
+        Diag.s("找到引擎类 " + Config.ENGINE_CLASS);
 
         Method getInstance = engineClass.getDeclaredMethod("getInstance");
         getInstance.setAccessible(true);
@@ -34,13 +35,16 @@ final class OcrEngine {
         if (engine == null) {
             throw new IllegalStateException("OCREngine.getInstance() 返回空");
         }
+        Diag.s("getInstance() 成功，本地 OCR so 已加载");
 
         Method init = engineClass.getDeclaredMethod("init", String.class, String.class);
         init.setAccessible(true);
         Object ok = init.invoke(engine, ctx.getCacheDir().getPath(), null);
         if (!Boolean.TRUE.equals(ok)) {
-            throw new IllegalStateException("OCREngine.init 失败：本地 OCR so 未成功加载");
+            throw new IllegalStateException("OCREngine.init 失败：本地 OCR so 未成功加载"
+                    + "（请先在相册里成功用过一次「提取文字」）");
         }
+        Diag.s("init(" + ctx.getCacheDir().getPath() + ", null) 返回 true");
 
         Method doOCR = engineClass.getDeclaredMethod("doOCR", Bitmap.class);
         doOCR.setAccessible(true);
@@ -48,6 +52,7 @@ final class OcrEngine {
         if (result == null) {
             throw new IllegalStateException("doOCR 返回空（引擎未就绪或 Bitmap 无效）");
         }
+        Diag.s("doOCR 返回结果类 " + result.getClass().getName());
 
         Field f = result.getClass().getField(Config.RESULT_FIELD);
         Object text = f.get(result);
@@ -67,7 +72,7 @@ final class OcrEngine {
             return "engine=" + (engine != null ? "OK" : "null")
                     + ", ocrSoLoaded=" + loaded
                     + ", sdk=" + Build.VERSION.SDK_INT
-                    + ", abi=" + Build.SUPPORTED_ABIS[0];
+                    + ", abi=" + (Build.SUPPORTED_ABIS.length > 0 ? Build.SUPPORTED_ABIS[0] : "?");
         } catch (Throwable t) {
             return "probe 失败: " + t;
         }

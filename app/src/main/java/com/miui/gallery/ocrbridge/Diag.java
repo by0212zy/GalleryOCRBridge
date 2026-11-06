@@ -13,7 +13,23 @@ final class Diag {
 
     private static final Set<String> ONCE = Collections.synchronizedSet(new HashSet<String>());
 
+    /** 模块实例，供不持有 chain 上下文的工作类打点。 */
+    private static volatile XposedModule bound;
+
     private Diag() {
+    }
+
+    static void bind(XposedModule m) {
+        bound = m;
+    }
+
+    /** 同时写 LSPosed 模块日志与系统 logcat，方便两种日志渠道都能看到全链路。 */
+    static void s(String msg) {
+        XposedModule m = bound;
+        if (m != null) {
+            i(m, msg);
+        }
+        Log.i(Config.TAG, msg);
     }
 
     static void i(XposedModule m, String msg) {

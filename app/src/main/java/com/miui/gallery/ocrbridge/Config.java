@@ -40,6 +40,15 @@ final class Config {
     /** 备用：同样 exported 且无权限。 */
     static final String CALL_URI_BACKUP = "content://com.miui.gallery.mediaeditor.authority";
 
+    /**
+     * 内存管道入口：shell 端 {@code screencap -p | content write --uri <INPUT_URI>}
+     * 把 PNG 写进相册进程内存，随后 extract_screen_text 直接消费，全程零临时文件。
+     * 这样截屏由有权限的 shell 进程完成，不依赖相册 app 进程的截屏权限 / su 提权。
+     */
+    static final String INPUT_PATH = "ocr_input";
+    static final String INPUT_URI = "content://com.miui.gallery.widget/ocr_input";
+    static final long INPUT_WAIT_MS = 4000L;
+
     /** 覆写了 call() 的相册 Provider，一并 hook 以覆盖备用 URI。 */
     static final String[] PROVIDER_CLASSES = {
             "com.miui.gallery.provider.GalleryWidgetOpenProvider",
