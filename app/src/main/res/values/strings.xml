@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">相册文字提取桥</string>
+    <string name="module_description">Hook 小米相册本地 OCR，一条 shell 命令提取当前屏幕文字；截屏只在内存完成，不产生临时截图文件，结果同步返回。基于 libxposed 现代 API 102，无界面、无启动图标，作用域仅系统相册。\n\n【主命令·同步返回文字】content call --uri content://com.miui.gallery.widget --method extract_screen_text\n【已有图片】content call --uri content://com.miui.gallery.widget --method extract_image_text --extra path:s:/sdcard/a.png\n【自检】content call --uri content://com.miui.gallery.widget --method ping\n【广播·异步】am broadcast -a com.miui.gallery.ocr.action.EXTRACT_SCREEN --es callback com.example.OCR_RESULT\n\n其它 App 可用 ContentResolver.call 直接同步拿文本。完整说明见 README.md</string>
+</resources>

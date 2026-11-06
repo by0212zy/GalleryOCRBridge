@@ -1,0 +1,77 @@
+package com.miui.gallery.ocrbridge;
+
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.os.Bundle;
+import android.text.TextUtils;
+
+/** 统一处理入口：截屏 / 读图 -> OCR -> 结果 Bundle。content call 与广播共用。 */
+final class OcrService {
+
+    private OcrService() {
+    }
+
+    static Bundle handle(ClassLoader loader, Context ctx, String method, Bundle extras) {
+        Bundle out = new Bundle();
+        Bitmap bm = null;
+        try {
+            if (ctx == null) {
+                throw new IllegalStateException("相册 Application 尚未就绪，请稍后重试");
+            }
+            if (Config.METHOD_PING.equals(method)) {
+                out.putBoolean(Config.EXTRA_SUCCESS, true);
+                out.putString(Config.EXTRA_TEXT, OcrEngine.probe(loader));
+                out.putString(Config.EXTRA_SOURCE, "ping");
+                return out;
+            }
+
+            String source;
+            if (Config.METHOD_IMAGE.equals(method)) {
+                String path = extras == null ? null : extras.getString(Config.EXTRA_PATH);
+                if (TextUtils.isEmpty(path)) {
+                    throw new IllegalArgumentException(
+                            "缺少图片路径：加 --extra path:s:/sdcard/xxx.png");
+                }
+                bm = BitmapFactory.decodeFile(path);
+                if (bm == null) {
+                    throw new IllegalStateException("无法读取图片：" + path);
+                }
+                source = "image:" + path;
+            } else {
+                // 当前屏幕 -> 内存 Bitmap（零临时截图文件）
+                bm = ScreenCapture.capture();
+                source = "screen";
+            }
+
+            String text = OcrEngine.recognize(loader, ctx, bm);
+            out.putBoolean(Config.EXTRA_SUCCESS, true);
+            out.putString(Config.EXTRA_TEXT, text == null ? "" : text);
+            out.putString(Config.EXTRA_SOURCE, source);
+        } catch (Throwable t) {
+            out.putBoolean(Config.EXTRA_SUCCESS, false);
+            out.putString(Config.EXTRA_TEXT, "");
+            out.putString(Config.EXTRA_ERROR, describe(t));
+        } finally {
+            if (bm != null && !bm.isRecycled()) {
+                bm.recycle();
+            }
+        }
+        return out;
+    }
+
+    private static String describe(Throwable t) {
+        StringBuilder sb = new StringBuilder();
+        Throwable cur = t;
+        for (int i = 0; i < 3 && cur != null; i++, cur = cur.getCause()) {
+            if (i > 0) {
+                sb.append(" <- ");
+            }
+            sb.append(cur.getClass().getSimpleName());
+            if (cur.getMessage() != null) {
+                sb.append('(').append(cur.getMessage()).append(')');
+            }
+        }
+        return sb.toString();
+    }
+}

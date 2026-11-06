@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 纯后台 Xposed 模块：无 Activity、无启动图标。
+         模块名取 android:label，说明取 android:description。 -->
+    <application
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:description="@string/module_description" />
+
+</manifest>
