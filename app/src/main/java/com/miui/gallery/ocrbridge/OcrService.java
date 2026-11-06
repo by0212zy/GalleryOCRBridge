@@ -7,7 +7,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.text.TextUtils;
 
-/** 统一处理入口：截屏 / 读图 -> OCR -> 结果 Bundle。content call 与广播共用。 */
+/** 统一处理入口：取图 -> OCR -> 结果 Bundle。content call 与广播共用。 */
 final class OcrService {
 
     private OcrService() {
@@ -44,10 +44,10 @@ final class OcrService {
                 Diag.s("已解码图片 " + path + " -> " + bm.getWidth() + "x" + bm.getHeight());
             } else if (Config.METHOD_BITMAP.equals(method)) {
                 // FV 悬浮球桥接：对方进程把已经截好的 Bitmap 放进 Bundle 直接送来。
-                // Bitmap 是 framework Parcelable，跨 Binder 走 ashmem，不受 1MB 事务限制。
                 Object o = extras == null ? null : extras.getParcelable(Config.EXTRA_BITMAP);
                 if (!(o instanceof Bitmap)) {
-                    throw new IllegalArgumentException("Bundle 里没有 Bitmap（key=" + Config.EXTRA_BITMAP + "）");
+                    throw new IllegalArgumentException(
+                            "Bundle 里没有 Bitmap（key=" + Config.EXTRA_BITMAP + "）");
                 }
                 bm = (Bitmap) o;
                 if (bm.isRecycled()) {
@@ -65,15 +65,16 @@ final class OcrService {
                 Diag.s("收到 App 传入的 Bitmap " + bm.getWidth() + "x" + bm.getHeight()
                         + " config=" + bm.getConfig());
             } else {
-                // 优先用 shell 端通过内存管道送进来的截图（零文件、无需 root）
+                // 截屏由 shell 进程完成，PNG 通过内存管道送进来（零文件、无需 root）。
+                // 正式版已删除进程内截屏回退：真机日志显示它从未命中，且 v1.0.0
+                // 正是它因权限被拒而让命令挂 20 秒。
                 bm = ScreenInput.take(Config.INPUT_WAIT_MS);
-                if (bm != null) {
-                    source = "screen:pipe";
-                } else {
-                    Diag.s("无管道截图，回退到进程内截屏（可能被权限拒绝）");
-                    bm = ScreenCapture.capture();
-                    source = "screen:app";
+                if (bm == null) {
+                    throw new IllegalStateException("没有收到截图。请先执行 "
+                            + "screencap -p | content write --uri " + Config.INPUT_URI
+                            + "，或改用 extract_image_text 传已有图片");
                 }
+                source = "screen:pipe";
             }
 
             Diag.s("送入 OCR，Bitmap=" + bm.getWidth() + "x" + bm.getHeight()

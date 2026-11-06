@@ -1,66 +1,49 @@
-# GalleryOCRBridge
+# GalleryOCRBridge · 相册文字提取桥
 
 Hook 小米相册的**本地 OCR 引擎**，做两件事：
 
-1. 把「提取当前屏幕文字」做成一条 shell 命令，供其它 App 调用；
-2. **v1.2.0 新增**：让 FV 悬浮球的「自动文字识别」无感改走小米相册 OCR，不用下载它自带的百度语言包、不用给它截屏权限、零临时文件。
+1. 把「提取当前屏幕文字」做成一条 shell 命令，供其它 App / Tasker / Termux / adb 调用；
+2. 让 **FV 悬浮球**的「自动文字识别」无感改走小米相册 OCR，不用下载它自带的百度语言包、不用给它截屏权限、零临时文件。
 
-基于 [libxposed 现代 API 102](https://github.com/libxposed/api)，LSPosed 模块，无界面、无启动图标。不修改系统属性、不改 Settings 数据库。**作用域勾选两个**：`com.miui.gallery`（系统相册）+ `com.fooview.android.fooview`（FV 悬浮球）。
-
-> **v1.1.0 重要修复**：v1.0.0 让相册 app 进程自己截屏，但普通 app 进程没有 `READ_FRAME_BUFFER`，截屏被 SurfaceFlinger 拒绝；`su` 从 app 进程提权又会卡在 Magisk 授权，命令会挂 20 秒后无输出。现在改为**由 shell 进程截屏**（shell uid 天然有截屏权限），PNG 通过内存管道直接送进相册进程，仍然零临时文件、不需要 root 提权。
+基于 [libxposed 现代 API 102](https://github.com/libxposed/api) 的 LSPosed 模块。**内置说明界面**（桌面图标「相册文字提取桥」），不修改系统属性、不改 Settings 数据库、不联网、不打包任何第三方 OCR / so / 模型。作用域勾选两个：`com.miui.gallery`（系统相册）+ `com.fooview.android.fooview`（FV 悬浮球）。
 
 ---
 
-## v1.2.0：FV 悬浮球「自动文字识别」改用小米相册 OCR
+## v2.0.0 正式版更新
 
-### 先回答：能直接调用小米相册的识别库吗？
+### 新增：说明界面
 
-**不能直接调用，但能无感用上，效果一样。**
+打开桌面图标即可看到完整的模块说明：
 
-反编译 FV 悬浮球 1.6.4 与小米相册 4.3.1.13 后确认，两边是**两个不同 App、两套不同进程、两个私有引擎**：
+- 模块功能、使用前提、返回字段、FV 接管说明、排查方式；
+- **全部 shell 命令一键复制**（也支持长按选中）；
+- **「运行自检」按钮**：直接向相册发起一次 `ping`，确认模块是否已在 LSPosed 生效、本地 OCR 引擎是否就绪；
+- 深浅色自适应，纯 framework API，界面只运行在模块自身进程，**与相册 / FV 进程里的 Hook 完全隔离**。
 
-| | FV 悬浮球 | 小米相册 |
-| --- | --- | --- |
-| 引擎 | 百度 PaddleLite（`BaiduOCREngine`） | 小米自研 `libmiocr.so`（`OCREngine`） |
-| 数据 | `ch_ppocr_mobile_v2.0_*.nb` 模型 + **要下载语言包** | so / 模型随相册内置，**开箱即用** |
-| 入口 | `z1/e.recognize(Bitmap) → String` | `OCREngine.doOCR(Bitmap) → total_text` |
-| 进程 | `com.fooview.android.fooview`（识别在 `:circle`） | `com.miui.gallery` |
+命令同时写进了 LSPosed 模块描述（模块列表里可直接看到）和本 README。
 
-小米相册的 `libmiocr.so` 和 `OCREngine` 类是**相册私有**的，装在相册的 dex / nativeLibraryDir 里，FV 进程既加载不到类、也 `loadLibrary` 不到 so。所以"直接调库"做不到。
+### 精简：删除从未命中的 Hook 与死代码
 
-但两个引擎的**接口形状完全一致**：都是吃一个内存 `Bitmap`、吐一段纯文本。于是本模块在中间架了一座桥：
+依据真机 LSPosed 日志逐条核对后，只保留真正生效的链路：
 
-```
-FV 自动文字识别（用户已授权的 MediaProjection 截图，现成 Bitmap）
-        │  Hook BaiduOCREngine.recognize(Bitmap) / z1-c.recognize(Bitmap)
-        ▼  把 Bitmap 跨进程送进相册（Binder ashmem，一次调用）
-小米相册 OCREngine.doOCR(Bitmap) → total_text
-        ▼  文本作为 recognize() 的返回值交回 FV
-FV 照常显示 / 复制 / 搜索 / 分享 / 翻译，全程无感
-```
+| 删除项 | 依据 |
+| --- | --- |
+| `ScreenCapture.java` 整个类（进程内截屏三级回退，175 行） | 日志中从未命中；且 v1.0.0 正是它因 `READ_FRAME_BUFFER` 被拒让命令挂 20 秒 |
+| 对 3 个相册 Provider 子类的额外 `call` / `openFile` Hook | 反编译确认 `GalleryWidgetOpenProvider` 未覆写 `call()`，全部命中都发生在基类 `ContentProvider` |
+| 备用 URI `com.miui.gallery.mediaeditor.authority` 及 FV 侧重试分支 | 主 URI `extract_bitmap` 60 次全部成功，备用从未使用 |
+| FV 桥接的「通道 B：`ocr_input` 管道」 | `extract_bitmap` 通道 27/27 成功，通道 B 一次都没走到 |
+| `Host` / `Diag` 中未被调用的工具方法、非目标包的调试日志 | 死代码 / 日志噪音 |
+| 给无关进程（`com.miuix.editor`、`com.miui.contentcatcher`、gms、webview 等）装 Hook | 分流改为严格按两个目标包判断，其它包直接跳过 |
 
-**好处**：FV 不再需要下载百度语言包（连"语言包未下载时空壳返回 null"的 `z1/c` 也一起接管）；不用 `screencap` 权限、不用 root、**不产生任何临时图片文件**——因为 FV 自己已经把屏幕截成 Bitmap 了，我们只是把它转交给相册。
-
-**三级保险，识别功能永不失效**：通道 A（Bundle 直传 Bitmap）→ 通道 B（`ocr_input` 内存管道）→ 都失败就 `chain.proceed()` 回退到 FV 自带 PaddleOCR。也就是相册没勾作用域 / 引擎没就绪 / 跨进程超时，FV 最多退回原来的行为，不会变坏。
-
-### 怎么用
-
-1. LSPosed 里给本模块**勾选两个作用域**：系统相册 `com.miui.gallery`、FV 悬浮球 `com.fooview.android.fooview`。
-2. 启用模块，**重启手机**（或至少强停相册 + FV 悬浮球）。
-3. 建议先在相册里成功用过一次「提取文字」，让本地 OCR so 就绪。
-4. 之后直接用 FV 原来的「自动文字识别 / 获取屏幕文字 / 识别图片中的文字」，出来的就是小米相册的识别结果，**不需要输入任何命令**。
-
-日志筛 `GalleryOCR`，看到 `FV 接管成功，小米相册 OCR 文本长度=NN` 即表示走的相册引擎；看到 `FV 桥接...回退本地 OCR` 说明桥接没成功（多半是两个作用域没勾全），此时 FV 仍用自带引擎，功能不受影响。
-
-**只想用 shell、不想 Hook FV？** FV 自带「执行 Shell 命令，输出命令返回的信息」动作，新建一个动作把下面「主命令」填进去即可，零开发、不用升级。注意 FV 的 shell 是 app uid，需要 root 并用 `su -c 'screencap -p'`，详见下方主命令。而 **v1.2.0 的 Hook 方式不需要这些**——它用 FV 自己截好的 Bitmap。
+**保留的生效链路**（日志命中次数）：`extract_bitmap` 60 次、`extract_screen_text` 14 次（全部走内存管道）、`extract_image_text` 4 次，以及 `ping` 与广播两个对外入口。净减约 200 行，功能不变。
 
 ---
 
 ## 先回答：要不要临时截图？
 
-**不需要临时截图文件。** 但截屏这个动作本身省不掉——OCR 要拿到屏幕像素。
+**不需要临时截图文件，但截屏动作本身省不掉**——OCR 需要拿到屏幕像素。
 
-反编译小米相册 4.3.1.13 后确认，它的「提取文字」用自研本地 OCR：
+反编译小米相册 4.3.1.13 确认，它的「提取文字」用自研本地 OCR：
 
 ```
 com.xiaomi.ocr.sdk_ocr.OCREngine
@@ -70,33 +53,30 @@ com.xiaomi.ocr.sdk_ocr.OCREngine
   OCRData$OCRResult.total_text  (public String)  ← 识别出的全文
 ```
 
-关键点是 **`doOCR` 吃的是内存里的 `Bitmap`，不是图片文件**。于是整条链路可以完全在内存里流转：
+关键是 **`doOCR` 吃的是内存里的 `Bitmap`，不是图片文件**，所以整条链路可以完全在内存里流转：
 
 ```
-shell: screencap -p  →  PNG 字节  →  content write (pipe)  →  相册进程内存 byte[]  →  Bitmap  →  native OCR  →  文本
+shell: screencap -p → PNG 字节 → content write (pipe) → 相册进程内存 byte[] → Bitmap → native OCR → 文本
 ```
 
 | | 说明 |
 | --- | --- |
-| 图片文件 | ❌ 不需要 |
-| 临时截图文件 | ❌ 不需要，PNG 走管道 |
-| 截屏动作 | ✅ 需要，但由 **shell 进程**完成（有权限），相册进程只负责 OCR |
-| root 提权 | ❌ 不需要（adb / 系统 shell 下） |
+| 图片文件 / 临时截图 | ❌ 不需要，PNG 走内存管道 |
+| 截屏动作 | ✅ 需要，但由 **shell 进程**完成（shell uid 天然有权限） |
+| root 提权 | ❌ 不需要（adb / 系统 shell 下）；Termux 是 app uid，需 root |
 | 生命周期 | Bitmap 用完立即 `recycle()`，全程零落盘 |
 
 ---
 
-## Shell 命令（可直接复制）
+## Shell 命令（可直接复制；App 内也可一键复制）
 
-### 主命令 · 提取当前屏幕文字，同步返回
-
-**在设备上（adb shell / 系统 shell）：**
+### ① 主命令 · 提取当前屏幕文字，同步返回
 
 ```sh
 screencap -p | content write --uri content://com.miui.gallery.widget/ocr_input && content call --uri content://com.miui.gallery.widget --method extract_screen_text
 ```
 
-**从电脑一条命令：**
+从电脑一条命令：
 
 ```sh
 adb shell 'screencap -p | content write --uri content://com.miui.gallery.widget/ocr_input && content call --uri content://com.miui.gallery.widget --method extract_screen_text'
@@ -108,28 +88,26 @@ adb shell 'screencap -p | content write --uri content://com.miui.gallery.widget/
 Bundle[{text=设置  搜索设置  网络和连接  WLAN  已连接 ... , success=true, source=screen:pipe}]
 ```
 
-> **Termux 用户**：Termux 的 shell 是 app uid，`screencap` 会被拒。有 root 时把 `screencap -p` 换成 `su -c 'screencap -p'` 即可：
+> **Termux 用户**：Termux 的 shell 是 app uid，`screencap` 会被拒。有 root 时改用：
 > ```sh
 > su -c 'screencap -p' | content write --uri content://com.miui.gallery.widget/ocr_input && content call --uri content://com.miui.gallery.widget --method extract_screen_text
 > ```
 
-### 兜底命令 · 临时截图即删（最稳，任何环境都可用）
+### ② 兜底命令 · 临时截图即删（最稳，任何环境可用）
 
-`content write` 在极个别 ROM 上不可用时，用这条。截图写到 `/sdcard/Pictures` 后立刻读取、用完 `rm` 删除，不残留：
+`content write` 在极个别 ROM 不可用时用这条。截图写到 `/sdcard/Pictures` 后立刻读取、用完 `rm` 删除，不残留；这也是**验证 OCR 引擎是否正常**的最快方式。
 
 ```sh
 screencap -p /sdcard/Pictures/.ocr_tmp.png && content call --uri content://com.miui.gallery.widget --method extract_image_text --extra path:s:/sdcard/Pictures/.ocr_tmp.png && rm /sdcard/Pictures/.ocr_tmp.png
 ```
 
-这条同时也是**验证 OCR 引擎是否正常**的最快方式。
-
-### 对已有图片提取文字
+### ③ 对已有图片提取文字
 
 ```sh
 content call --uri content://com.miui.gallery.widget --method extract_image_text --extra path:s:/sdcard/Pictures/a.png
 ```
 
-### 自检（不截屏，只看 OCR 引擎是否就绪）
+### ④ 自检（不截屏，只看 OCR 引擎是否就绪）
 
 ```sh
 content call --uri content://com.miui.gallery.widget --method ping
@@ -139,33 +117,14 @@ content call --uri content://com.miui.gallery.widget --method ping
 Bundle[{text=engine=OK, ocrSoLoaded=true, sdk=35, abi=arm64-v8a, success=true, source=ping}]
 ```
 
-`ocrSoLoaded=false` 说明本地 OCR 的 so 没加载成功，见「前提与排查」。
+`ocrSoLoaded=false` 说明本地 OCR 的 so 没加载成功，见「前提与排查」。App 内的「运行自检」按钮等价于这条命令。
 
-### 备用 URI（主 URI 不通时把两处 `com.miui.gallery.widget` 一起换掉）
-
-```
-content://com.miui.gallery.mediaeditor.authority
-```
-
-### 返回字段
-
-| key | 类型 | 含义 |
-| --- | --- | --- |
-| `success` | boolean | 是否成功 |
-| `text` | String | 识别出的全文（失败时为空串） |
-| `error` | String | 失败原因（仅失败时） |
-| `source` | String | `screen:pipe` / `screen:app` / `image:<路径>` / `bitmap:app` / `ping` |
-
-`source=screen:pipe` 表示用的是主通道；`screen:app` 表示退回了相册进程内截屏（可能被权限拒绝）；`bitmap:app` 表示 Bitmap 由其它 App（如 FV 悬浮球）直接传入。
-
----
-
-## 广播方式（异步，适合 Tasker / MacroDroid / 其它 App）
+### ⑤ 广播 · 异步（Tasker / MacroDroid / 其它 App）
 
 `am broadcast` 无法同步回传文本，结果通过参数指定去向，**三个参数可叠加**：
 
 ```sh
-# 结果作为广播发回（其它 App 注册接收 com.example.OCR_RESULT 的 Receiver）
+# 结果作为广播发回（其它 App 注册接收 com.example.OCR_RESULT）
 am broadcast -a com.miui.gallery.ocr.action.EXTRACT_SCREEN --es callback com.example.OCR_RESULT
 
 # 结果写入文件
@@ -178,7 +137,57 @@ am broadcast -a com.miui.gallery.ocr.action.EXTRACT_SCREEN --ez clip true
 am broadcast -a com.miui.gallery.ocr.action.EXTRACT_IMAGE --es path /sdcard/Pictures/a.png
 ```
 
-什么都不给也会把文本打到 logcat（`tag: GalleryOCR`）。广播路径若没有先走 `content write`，会回退到相册进程内截屏，成功率低于主通道，建议配合管道或直接用 `content call`。
+什么都不给也会把文本打到 logcat（`tag: GalleryOCR`）。广播路径需要先走 `content write` 把截图送进内存管道，否则会返回「没有收到截图」；同步场景建议直接用 `content call`。
+
+### 返回字段
+
+| key | 类型 | 含义 |
+| --- | --- | --- |
+| `success` | boolean | 是否成功 |
+| `text` | String | 识别出的全文（失败时为空串） |
+| `error` | String | 失败原因（仅失败时） |
+| `source` | String | `screen:pipe`（内存管道）/ `image:<路径>` / `bitmap:app`（其它 App 传入）/ `ping` |
+
+---
+
+## FV 悬浮球：自动文字识别改用小米相册 OCR
+
+### 能直接调用小米相册的识别库吗？
+
+**不能直接调库，但能无感用上，效果一样。** 反编译 FV 悬浮球 1.6.4 与小米相册 4.3.1.13 后确认，两边是**两个 App、两套私有引擎**：
+
+| | FV 悬浮球 | 小米相册 |
+| --- | --- | --- |
+| 引擎 | 百度 PaddleLite（`BaiduOCREngine`） | 小米自研 `libmiocr.so`（`OCREngine`） |
+| 数据 | `ch_ppocr_mobile_v2.0_*.nb` 模型 + **要下载语言包** | so / 模型随相册内置，**开箱即用** |
+| 入口 | `z1/e.recognize(Bitmap) → String` | `OCREngine.doOCR(Bitmap) → total_text` |
+| 进程 | `com.fooview.android.fooview`（识别在 `:circle`） | `com.miui.gallery` |
+
+小米相册的 `libmiocr.so` 和 `OCREngine` 是相册私有的，FV 进程加载不到。但两个引擎的**接口形状完全一致**（都吃内存 Bitmap、吐纯文本），于是模块在中间架了一座桥：
+
+```
+FV 自动文字识别（自己已截好的 Bitmap）
+        │  Hook BaiduOCREngine / z1-c 的 recognize(Bitmap)
+        ▼  Bundle 直传 Bitmap，一次 Binder（ashmem）
+小米相册 OCREngine.doOCR(Bitmap) → total_text
+        ▼  文本作为 recognize() 的返回值交回 FV
+FV 照常显示 / 复制 / 搜索 / 分享，全程无感
+```
+
+**好处**：不用下载 FV 的百度语言包（连「语言包未下载时返回 null」的空壳 `z1/c` 也一起接管）、不用 `screencap` 权限、不用 root、**零临时图片文件**。
+
+**两级保险**：主通道 `extract_bitmap` 成功就用相册结果；相册没勾作用域 / 引擎未就绪 / 跨进程超时，则 `chain.proceed()` 回退到 FV 自带 PaddleOCR，识别功能不会变坏。
+
+### 怎么用
+
+1. LSPosed 里给本模块**勾选两个作用域**：系统相册 `com.miui.gallery`、FV 悬浮球 `com.fooview.android.fooview`。
+2. 启用模块，**重启手机**（或至少强停相册 + FV 悬浮球）。
+3. 建议先在相册里成功用过一次「提取文字」，让本地 OCR so 就绪。
+4. 之后直接用 FV 原来的「自动文字识别」，出来的就是小米相册的识别结果，**不需要输入任何命令**。
+
+日志筛 `GalleryOCR`，看到 `FV 接管成功，小米相册 OCR 文本长度=NN` 即表示走的是相册引擎。
+
+**只想用 shell、不想 Hook FV？** FV 自带「执行 Shell 命令，输出命令返回的信息」动作，新建一个动作把上面「主命令」填进去即可（需 root 并用 `su -c 'screencap -p'`）。
 
 ---
 
@@ -212,6 +221,8 @@ Bundle reply = getContentResolver().call(
         "extract_image_text", null, args);
 ```
 
+也可以把 `Bitmap` 直接放进 Bundle，用内部 method `extract_bitmap` 一次调用拿到 `text`（模块给 FV 悬浮球用的就是这条）。
+
 ### 方式二：sendBroadcast（异步，结果走回调广播）
 
 ```java
@@ -233,10 +244,10 @@ content call --uri content://com.miui.gallery.widget --method extract_screen_tex
 
 ## 前提与排查
 
-1. **LSPosed 作用域勾选「系统相册 / 小米相册」`com.miui.gallery`**；要用 FV 自动识别接管（v1.2.0）再勾上 **FV 悬浮球 `com.fooview.android.fooview`**。启用模块后**重启手机**（或至少强停相册 / FV 悬浮球）。只用 shell 命令的话勾相册一个就够。
-2. **建议先在相册里成功用过一次「提取文字」**，确保本地 OCR 的 so / 模型就绪。`ping` 显示 `ocrSoLoaded=true` 即可。
+1. **LSPosed 作用域勾选「系统相册 / 小米相册」`com.miui.gallery`**；要用 FV 自动识别接管再勾上 **FV 悬浮球 `com.fooview.android.fooview`**。启用模块后**重启手机**（或至少强停相册 / FV 悬浮球）。只用 shell 命令的话勾相册一个就够。
+2. **建议先在相册里成功用过一次「提取文字」**，确保本地 OCR 的 so / 模型就绪。`ping` 显示 `ocrSoLoaded=true`，或 App 内「运行自检」显示「模块已生效」即可。
 3. **`screencap` 权限**：adb shell / 系统 shell 下直接可用；Termux 需 root 并改用 `su -c 'screencap -p'`。
-4. **v1.1.0 起全链路都有日志**，LSPosed 日志筛 `GalleryOCR` 就能看到每一步：
+4. **全链路都有日志**，LSPosed 日志筛 `GalleryOCR` 或 `adb logcat -s GalleryOCR`：
    ```
    ★ content call 命中 method=extract_screen_text
    截图管道已建立，等待 shell 写入
@@ -246,9 +257,9 @@ content call --uri content://com.miui.gallery.widget --method extract_screen_tex
    找到引擎类 ... / getInstance() 成功 / init(...) 返回 true / doOCR 返回结果类 ...
    OCR 完成，文本长度=87
    ```
-   哪一行断了就是哪一步的问题。也可以用 `adb logcat -s GalleryOCR`。
+   哪一行断了就是哪一步的问题。
 5. 返回 `success=false` 时看 `error` 字段：
-   - 「进程内截屏失败」→ 说明没走管道，检查主命令是否完整、`content write` 是否报错；
+   - 「没有收到截图」→ 主命令的 `content write` 那段没成功，检查命令是否完整，或改用兜底命令；
    - 「OCREngine.init 失败」→ 见第 2 条；
    - 「无法读取图片」→ 路径或权限问题，换 `/sdcard/Pictures/` 下的路径试试。
 
@@ -256,15 +267,13 @@ content call --uri content://com.miui.gallery.widget --method extract_screen_tex
 
 ## 技术原理
 
-- `META-INF/xposed/java_init.list` 声明入口 `com.miui.gallery.ocrbridge.ModuleMain`，`scope.list` 写 `com.miui.gallery` + `com.fooview.android.fooview`，`staticScope=false`。`onPackageReady` 按包名分流，两个进程互不干扰。
-- **相册进程（服务端）**：Hook `android.content.ContentProvider` 的：
-  - `call()` 两个重载 → 命中 `extract_screen_text` / `extract_image_text` / `extract_bitmap` / `ping` 时同步返回结果 Bundle；
-  - `openFile()` / `openAssetFile()` → URI 含 `ocr_input` 时返回 `ParcelFileDescriptor.createPipe()` 的写端，读端由后台线程解码成 Bitmap 存内存。
-  其余一律 `chain.proceed()`，不影响相册自身逻辑。
-- **FV 进程（客户端）**：Hook FV 里所有「`(Bitmap) → String`、非抽象」的 `recognize` 方法（含百度 `BaiduOCREngine` 与语言包未下载时的空壳 `z1/c`），把入参 Bitmap 跨进程交给相册 OCR，`total_text` 作为返回值。三级回退保证 FV 原功能不坏。
-- OCR 完全靠反射调用相册自带 `OCREngine`，不打包任何第三方 OCR / so / 模型，APK 仅 30 KB 左右。因为运行在相册进程，宿主的 `libmiocr.so` 天然可被 `System.loadLibrary` 找到。
-- 跨进程 Bitmap 走 Binder `Parcelable` + ashmem（不受 1MB 事务限制）；`HARDWARE` / mutable Bitmap 会先转成 `ARGB_8888` 只读副本再送进 native 层，避免像素不可读。
-- 广播接收器是动态注册的 exported Receiver（Android 13+ 用 `RECEIVER_EXPORTED`），延后到应用就绪之后注册，避免早期触发宿主 `<clinit>`。
+- `META-INF/xposed/java_init.list` 声明入口 `com.miui.gallery.ocrbridge.ModuleMain`，`scope.list` 写 `com.miui.gallery` + `com.fooview.android.fooview`，`staticScope=false`。`onPackageReady` **严格按包名分流**，其它包直接跳过。
+- **相册进程（服务端）**：只 Hook 基类 `android.content.ContentProvider` 的 `call()` 重载（命中 `extract_screen_text` / `extract_image_text` / `extract_bitmap` / `ping` 时同步返回结果 Bundle）与 `openFile()` / `openAssetFile()`（URI 含 `ocr_input` 时返回 `ParcelFileDescriptor.createPipe()` 的写端，读端由后台线程解码成 Bitmap 存内存）。其余一律 `chain.proceed()`，不影响相册自身逻辑。
+- **FV 进程（客户端）**：Hook FV 里所有「`(Bitmap) → String`、非抽象」的 `recognize` 方法（含百度 `BaiduOCREngine` 与语言包空壳 `z1/c`），用 `extract_bitmap` 把 Bitmap 跨进程交给相册 OCR，`total_text` 作为返回值；失败回退 FV 自带引擎。
+- OCR 完全靠反射调用相册自带 `OCREngine`，不打包任何第三方 OCR / so / 模型。因为运行在相册进程，宿主的 `libmiocr.so` 天然可被 `System.loadLibrary` 找到。
+- 跨进程 Bitmap 走 Binder `Parcelable` + ashmem（不受 1MB 事务限制）；`HARDWARE` / mutable Bitmap 会先转成 `ARGB_8888` 只读副本再送进 native 层。
+- 广播接收器是动态注册的 exported Receiver（Android 13+ 用 `RECEIVER_EXPORTED`），延后到应用就绪后注册，避免早期触发宿主 `<clinit>`。
+- 说明界面 `MainActivity` 是普通 Activity（无第三方 UI 依赖），只在模块自身进程运行，不参与 Hook。
 
 ## 构建
 
@@ -272,7 +281,7 @@ content call --uri content://com.miui.gallery.widget --method extract_screen_tex
 ./gradlew assembleRelease
 ```
 
-产物 `app/build/outputs/apk/release/app-release.apk`。GitHub Actions 在 push / tag 时自动构建 release APK 并上传 artifact。
+产物 `app/build/outputs/apk/release/app-release.apk`。GitHub Actions 在 push / tag 时自动构建 release APK 并上传 artifact；Release 附件在发版时手动上传带版本号的 APK 与源码包。
 
 ## 许可与说明
 

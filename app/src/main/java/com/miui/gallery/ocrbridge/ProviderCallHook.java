@@ -15,20 +15,16 @@ import io.github.libxposed.api.XposedModule;
 
 /**
  * 把相册的 ContentProvider 变成两个入口：
+ *   1) call()                       —— content call 同步返回识别文本
+ *   2) openFile()/openAssetFile()   —— content write 把 shell 端截屏写进内存管道
  *
- * 1) call()  —— content call 同步返回识别文本（主入口）
- * 2) openFile()/openAssetFile() —— content write 把 shell 端截屏写进内存管道
+ * 为什么用 content call：Provider 是静态组件，content call 会自动拉起相册进程；
+ * call() 的返回值同步打印到 shell，正好回传文字；com.miui.gallery.widget 是
+ * exported 且无权限保护的 authority，任何 App 都能调。
  *
- * 为什么用 content call：
- *   - Provider 是静态注册组件，content call 会自动把相册进程拉起来，不需要常驻服务；
- *   - call() 的返回值会同步打印到 shell，正好用来回传识别出的文字；
- *   - com.miui.gallery.widget 是 exported 且无权限保护的 authority，任何 App 都能调。
- *
- * 为什么还要管道：相册是普通 app 进程，没有 READ_FRAME_BUFFER，进程内截全屏会被
- * SurfaceFlinger 拒绝；从 app 进程 su 提权又会卡在 Magisk 授权。所以截屏改由
- * shell 进程（有权限）执行，PNG 通过 pipe 直接进相册进程内存，零临时文件。
- *
- * method 名通过扫描所有 String 参数定位，不受 3 参数 / 4 参数签名差异影响。
+ * 正式版只 Hook 基类 android.content.ContentProvider：反编译确认相册的
+ * GalleryWidgetOpenProvider 并未覆写 call()，走的就是基类；真机日志里全部命中
+ * 也都发生在基类。旧版额外 Hook 3 个 Provider 子类属于从未命中的冗余，已移除。
  */
 final class ProviderCallHook {
 
@@ -48,20 +44,7 @@ final class ProviderCallHook {
                     calls++;
                 }
             }
-            pipes += hookInput(module, base);
-        }
-
-        for (String cn : Config.PROVIDER_CLASSES) {
-            Class<?> c = Host.find(loader, cn);
-            if (c == null) {
-                continue;
-            }
-            for (Method m : c.getDeclaredMethods()) {
-                if (isCall(m) && hookCall(module, m)) {
-                    calls++;
-                }
-            }
-            pipes += hookInput(module, c);
+            pipes = hookInput(module, base);
         }
         Diag.i(module, pkg + ": call 入口 " + calls + " 处，截图管道 " + pipes + " 处");
     }
@@ -100,14 +83,13 @@ final class ProviderCallHook {
 
                         Diag.s("★ content call 命中 method=" + method);
                         Context ctx = Host.application();
-                        ClassLoader loader = ctx != null ? ctx.getClassLoader() : null;
-                        if (ctx == null || loader == null) {
+                        if (ctx == null) {
                             Bundle err = new Bundle();
                             err.putBoolean(Config.EXTRA_SUCCESS, false);
                             err.putString(Config.EXTRA_ERROR, "相册 Application 未就绪，请稍后重试");
                             return err;
                         }
-                        return OcrService.handle(loader, ctx, method, extras);
+                        return OcrService.handle(ctx.getClassLoader(), ctx, method, extras);
                     });
             try {
                 module.deoptimize(m);
@@ -116,7 +98,7 @@ final class ProviderCallHook {
             }
             return true;
         } catch (Throwable t) {
-            Diag.w(module, "hook " + m.getDeclaringClass().getName() + ".call 失败", t);
+            Diag.w(module, "hook ContentProvider.call 失败", t);
             return false;
         }
     }
@@ -167,7 +149,7 @@ final class ProviderCallHook {
                 }
                 n++;
             } catch (Throwable t) {
-                Diag.w(module, "hook " + c.getName() + "." + name + " 失败", t);
+                Diag.w(module, "hook ContentProvider." + name + " 失败", t);
             }
         }
         return n;

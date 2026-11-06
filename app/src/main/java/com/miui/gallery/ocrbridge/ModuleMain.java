@@ -11,16 +11,12 @@ import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam;
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
 
 /**
- * 模块入口（META-INF/xposed/java_init.list）。
- *
- * v1.2.0 起一个模块管两个作用域，按包名分流：
+ * 模块入口（META-INF/xposed/java_init.list），按包名严格分流：
  *   com.miui.gallery            （服务端）ProviderCallHook + BroadcastTrigger
- *                                把相册自带本地 OCR 暴露成 content call / 广播。
  *   com.fooview.android.fooview（客户端）FvOcrHook
- *                                把 FV 悬浮球「自动文字识别」的 Bitmap 转发给相册，
- *                                取回文本作为 recognize() 的返回值。
+ * 其它包一律跳过，不给无关进程装任何 Hook。
  *
- * 不修改系统属性、不改 Settings 数据库、不 Hook 其它 App。
+ * 不修改系统属性、不改 Settings 数据库、不联网、不打包第三方 OCR。
  */
 public class ModuleMain extends XposedModule {
 
@@ -42,31 +38,29 @@ public class ModuleMain extends XposedModule {
     @Override
     public void onPackageReady(PackageReadyParam param) {
         final String pkg = param.getPackageName();
+        // 只处理两个目标包，其它包（同进程内被 LSPosed 回调的 gms/webview 等）直接跳过
+        if (!Config.TARGET_PKG.equals(pkg) && !Config.FV_PKG.equals(pkg)) {
+            return;
+        }
         final String proc = processName;
         final ClassLoader loader = param.getClassLoader();
         if (loader == null) {
             return;
         }
-
-        String key = proc + "|" + pkg + "|" + System.identityHashCode(loader);
-        if (!INSTALLED.add(key)) {
+        if (!INSTALLED.add(proc + "|" + pkg + "|" + System.identityHashCode(loader))) {
             return;
         }
 
         Diag.i(this, "onPackageReady 进程=" + proc + " 包=" + pkg);
         try {
             if (Config.FV_PKG.equals(pkg)) {
-                // FV 悬浮球（含 :circle 子进程）：只装客户端 Hook，不碰它的 Provider
                 FvOcrHook.install(this, loader, pkg);
-            } else if (Config.TARGET_PKG.equals(pkg)) {
-                // 小米相册（含 :remote 等子进程）：装服务端 Hook
+            } else {
                 ProviderCallHook.install(this, loader, pkg);
                 // 广播接收器只在主进程注册，避免一条广播被多个子进程重复触发
                 if (!proc.contains(":")) {
                     BroadcastTrigger.install(this, pkg);
                 }
-            } else {
-                Diag.i(this, "非目标包，跳过: " + pkg);
             }
         } catch (Throwable t) {
             Diag.e(this, "安装 Hook 失败: " + pkg + "/" + proc, t);

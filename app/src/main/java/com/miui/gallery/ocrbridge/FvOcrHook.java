@@ -7,7 +7,6 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 
-import java.io.OutputStream;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.concurrent.Callable;
@@ -23,24 +22,19 @@ import io.github.libxposed.api.XposedModule;
  * FV 悬浮球侧（客户端）：把它的「自动文字识别」无感转发给小米相册的本地 OCR。
  *
  * 反编译 FV 悬浮球 1.6.4 确认：
- *   z1/e                                     抽象引擎基类
- *     .recognize(Bitmap) -> String           统一入口，返回合并后的纯文本
- *   com.baidu.paddle.lite.demo.ocr.BaiduOCREngine   百度 PaddleLite 本地实现（要下载语言包）
- *   z1/c                                    语言包未下载时的空壳（直接返回 null）
- *   com.fooview...ocrservice.CircleService$c$a      在 :circle 进程调用 recognize，
- *                                                  用 ConditionVariable 同步等结果
+ *   z1/e.recognize(Bitmap) -> String                  统一入口，返回合并后的纯文本
+ *   com.baidu.paddle.lite.demo.ocr.BaiduOCREngine    百度 PaddleLite 本地实现（要下载语言包）
+ *   z1/c                                            语言包未下载时的空壳（直接返回 null）
  *
  * 小米相册的 libmiocr.so / OCREngine 是相册私有，FV 进程无法直接加载；但相册进程里
- * 本模块已经把 OCR 暴露成 content://com.miui.gallery.widget 的 call()。于是这里把
- * FV 已经截好的 Bitmap 跨进程送过去，取回 total_text 作为 recognize() 的返回值。
+ * 本模块已把 OCR 暴露成 content://com.miui.gallery.widget 的 call()。于是这里把
+ * FV 已经截好的 Bitmap 放进 Bundle 一次 Binder 送过去，取回 total_text 作为
+ * recognize() 的返回值。
  *
- * 关键：全程用 FV 自己截好的 Bitmap，不需要 screencap 权限、不需要 root、不落盘，
- * 也不依赖 FV 下载百度语言包（连 z1/c 空壳一起接管）。
- *
- * 三级保险，任何一步失败都不让 FV 的识别功能坏掉：
- *   通道 A：Bundle 直接带 Bitmap（一次 Binder，ashmem）
- *   通道 B：ocr_input 内存管道 + extract_screen_text（v1.1.0 通道）
- *   兜底  ：chain.proceed() 回退到 FV 自带 PaddleOCR
+ * 正式版 v2.0.0：真机日志显示 extract_bitmap 通道 27/27 全部成功，从未用过
+ * ocr_input 管道与备用 URI，因此删除这两条冗余路径，只保留主通道 + 兜底：
+ *   主通道：Bundle 直传 Bitmap（extract_bitmap，ashmem，不受 1MB 事务限制）
+ *   兜底  ：chain.proceed() 回退到 FV 自带 PaddleOCR，识别功能永不失效
  */
 final class FvOcrHook {
 
@@ -55,8 +49,8 @@ final class FvOcrHook {
 
     static void install(XposedModule module, ClassLoader loader, String pkg) {
         int n = 0;
-        // 目标是所有「参数 (Bitmap)、返回 String、非抽象」的 recognize 方法。
-        // 只按签名匹配，不写死方法所在的类，兼容 FV 不同版本的混淆差异。
+        // 目标是「参数 (Bitmap)、返回 String、非抽象」的 recognize 方法。
+        // 只按签名匹配，不写死方法所在类，兼容 FV 不同版本的混淆差异。
         for (String cn : Config.FV_ENGINE_CLASSES) {
             Class<?> c = Host.find(loader, cn);
             if (c == null) {
@@ -64,10 +58,8 @@ final class FvOcrHook {
                 continue;
             }
             for (Method m : c.getDeclaredMethods()) {
-                if (!"recognize".equals(m.getName())) {
-                    continue;
-                }
-                if (Modifier.isAbstract(m.getModifiers())) {
+                if (!"recognize".equals(m.getName())
+                        || Modifier.isAbstract(m.getModifiers())) {
                     continue;
                 }
                 Class<?>[] ps = m.getParameterTypes();
@@ -157,65 +149,35 @@ final class FvOcrHook {
             }
             ContentResolver cr = ctx.getContentResolver();
 
-            // 通道 A：Bitmap 直接放进 Bundle，一次 content call 完成。
-            // 相册进程冷启动时首次可能还没注入，重试 2 次。
+            // HARDWARE / mutable Bitmap 不适合跨 Binder 用 ashmem 传，复制成只读软件副本
             Bitmap soft = softwareCopy(src);
-            for (int i = 0; i < 2; i++) {
-                try {
-                    Bundle args = new Bundle();
-                    args.putParcelable(Config.EXTRA_BITMAP, soft == null ? src : soft);
-                    Bundle r = cr.call(Uri.parse(Config.CALL_URI),
-                            Config.METHOD_BITMAP, null, args);
-                    String t = textOf(r);
-                    if (t != null) {
-                        Diag.s("FV 通道A(extract_bitmap) 成功");
-                        return t;
-                    }
-                } catch (Throwable t) {
-                    Diag.s("FV 通道A 第" + (i + 1) + "次失败: " + t);
-                }
-                sleep(350);
-            }
-
-            // 通道 B：内存管道写 PNG，再 extract_screen_text 取走。
             try {
-                try (OutputStream os = cr.openOutputStream(Uri.parse(Config.INPUT_URI), "w")) {
-                    if (os == null) {
-                        throw new IllegalStateException("openOutputStream 返回空");
+                // 相册进程冷启动时首次可能还没注入，重试 2 次
+                for (int i = 0; i < 2; i++) {
+                    try {
+                        Bundle args = new Bundle();
+                        args.putParcelable(Config.EXTRA_BITMAP, soft == null ? src : soft);
+                        Bundle r = cr.call(Uri.parse(Config.CALL_URI),
+                                Config.METHOD_BITMAP, null, args);
+                        String t = textOf(r);
+                        if (t != null) {
+                            Diag.s("FV 通道A(extract_bitmap) 成功");
+                            return t;
+                        }
+                    } catch (Throwable t) {
+                        Diag.s("FV 通道A 第" + (i + 1) + "次失败: " + t);
                     }
-                    src.compress(Bitmap.CompressFormat.PNG, 100, os);
-                    os.flush();
+                    sleep(350);
                 }
-                Bundle r = cr.call(Uri.parse(Config.CALL_URI),
-                        Config.METHOD_SCREEN, null, new Bundle());
-                String t = textOf(r);
-                if (t != null) {
-                    Diag.s("FV 通道B(ocr_input) 成功");
-                    return t;
-                }
-            } catch (Throwable t) {
-                Diag.s("FV 通道B 失败: " + t);
-            }
-
-            // 备用 URI 再试一次 A
-            try {
-                Bundle args = new Bundle();
-                args.putParcelable(Config.EXTRA_BITMAP, soft == null ? src : soft);
-                Bundle r = cr.call(Uri.parse(Config.CALL_URI_BACKUP),
-                        Config.METHOD_BITMAP, null, args);
-                return textOf(r);
-            } catch (Throwable t) {
-                Diag.s("FV 备用 URI 失败: " + t);
-                return null;
             } finally {
                 if (soft != null && !soft.isRecycled()) {
                     soft.recycle();
                 }
             }
+            return null;
         }
     }
 
-    /** HARDWARE / mutable Bitmap 不适合跨 Binder 用 ashmem 传，复制成 ARGB_8888 只读副本。 */
     private static Bitmap softwareCopy(Bitmap b) {
         try {
             boolean hardware = Build.VERSION.SDK_INT >= 26
@@ -230,11 +192,10 @@ final class FvOcrHook {
     }
 
     private static String textOf(Bundle r) {
-        if (r == null) {
-            return null;
-        }
-        if (!r.getBoolean(Config.EXTRA_SUCCESS, false)) {
-            Diag.s("FV: 相册返回失败 " + r.getString(Config.EXTRA_ERROR));
+        if (r == null || !r.getBoolean(Config.EXTRA_SUCCESS, false)) {
+            if (r != null) {
+                Diag.s("FV: 相册返回失败 " + r.getString(Config.EXTRA_ERROR));
+            }
             return null;
         }
         String t = r.getString(Config.EXTRA_TEXT, "");
