@@ -59,7 +59,7 @@ final class OcrEngine {
         return text == null ? "" : text.toString();
     }
 
-    /** 自检：只加载引擎类并触发 so 加载，不截屏、不 OCR。 */
+    /** 引擎状态探测：只加载引擎类并触发 so 加载，不截屏、不 OCR。 */
     static String probe(ClassLoader loader) {
         try {
             Class<?> c = Class.forName(Config.ENGINE_CLASS, false, loader);

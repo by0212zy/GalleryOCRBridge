@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- LSPosed 模块元数据在 META-INF/xposed/*；本清单只提供模块说明界面。
+         不声明 LAUNCHER，桌面不出现图标；改用 Xposed 生态惯例的 MODULE_SETTINGS，
+         由 LSPosed 模块页的「启动」入口打开本界面。
          MainActivity 运行在模块自身进程，与相册 / FV 进程里的 Hook 完全隔离。 -->
     <application
         android:allowBackup="false"
@@ -16,7 +18,7 @@
             android:label="@string/app_name">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="de.robv.android.xposed.category.MODULE_SETTINGS" />
             </intent-filter>
         </activity>
     </application>

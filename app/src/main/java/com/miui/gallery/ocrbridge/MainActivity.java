@@ -7,7 +7,6 @@ import android.content.Context;
 import android.content.res.Configuration;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
-import android.net.Uri;
 import android.os.Bundle;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -20,15 +19,13 @@ import android.widget.Toast;
  * 模块说明界面：把功能说明、使用前提与全部 shell 命令直接写进 App 里。
  *
  * 纯 framework API，不引入任何第三方 UI 依赖；深浅色跟随系统。
- * 每条命令都能一键复制；「运行自检」会直接调用相册的 content call ping，
- * 用来确认模块是否已在 LSPosed 中生效。
+ * 每条命令都能一键复制。本模块不注册桌面启动图标，界面从
+ * LSPosed → 模块 → 长按本模块 →「启动」打开。
  *
  * 注意：本 Activity 只运行在模块自身进程，与相册 / FV 进程里的 Hook 完全隔离，
  * 因此不会影响 Hook 的加载，也不需要在 LSPosed 作用域里勾选模块自己。
  */
 public class MainActivity extends Activity {
-
-    private static final String URI_CALL = "content://com.miui.gallery.widget";
 
     private static final String CMD_MAIN =
             "screencap -p | content write --uri content://com.miui.gallery.widget/ocr_input "
@@ -118,13 +115,13 @@ public class MainActivity extends Activity {
         }
 
         addHeader(version);
-        addSelfCheckCard();
         addCard("模块功能",
                 "① 屏幕文字提取：把小米相册的本地 OCR 开放成一条 shell 命令，"
                         + "content call 同步返回识别出的文字，其它 App / Tasker / Termux / adb 都能调用。\n\n"
                         + "② FV 悬浮球接管：让它的「自动文字识别」无感改走小米相册 OCR，"
                         + "不用下载百度语言包、不用给它截屏权限、不需要 root。\n\n"
-                        + "③ 内置说明界面：本页可直接复制全部命令，不依赖网络。\n\n"
+                        + "③ 内置说明界面：本页可直接复制全部命令，不依赖网络；"
+                        + "从 LSPosed 模块页「启动」进入，桌面不占用图标。\n\n"
                         + "识别全程在内存里完成：shell 截屏 → 内存管道 → Bitmap → 相册本地 OCR → 文本，"
                         + "零临时文件。不联网、不上传、不修改系统属性与 Settings 数据库。");
 
@@ -145,8 +142,8 @@ public class MainActivity extends Activity {
                         + "不残留；这也是验证 OCR 引擎是否正常的最快方式。",
                 CMD_FALLBACK);
         addCommandCard("③ 对已有图片提取文字", "把 path 换成实际图片路径即可。", CMD_IMAGE);
-        addCommandCard("④ 自检（不截屏）",
-                "返回 ocrSoLoaded=true 表示相册本地 OCR 就绪。也可直接点上方「运行自检」。",
+        addCommandCard("④ 查看 OCR 引擎状态（不截屏）",
+                "返回 ocrSoLoaded=true 表示相册本地 OCR 就绪，排查时用。",
                 CMD_PING);
         addCommandCard("Termux（需 root）",
                 "Termux 是 app uid，screencap 会被拒，有 root 时改用 su -c 提权截屏。",
@@ -179,7 +176,7 @@ public class MainActivity extends Activity {
                         + "日志出现「FV 接管成功」即表示走的是小米相册引擎。");
 
         addCard("排查",
-                "• 点上方「运行自检」；或执行 ping 看 ocrSoLoaded 是否为 true。\n"
+                "• 执行 ping 看 ocrSoLoaded 是否为 true。\n"
                         + "• 返回 success=false 时看 error 字段：提示「没有收到截图」说明主命令的 "
                         + "content write 那段没执行成功，请改用兜底命令；提示 OCREngine.init 失败，"
                         + "请先在相册里成功用一次「提取文字」。\n"
@@ -213,73 +210,6 @@ public class MainActivity extends Activity {
         intro.setLineSpacing(dp(3), 1f);
         intro.setPadding(0, dp(12), 0, dp(4));
         container.addView(intro);
-    }
-
-    private void addSelfCheckCard() {
-        LinearLayout card = newCard();
-        addCardTitle(card, "运行自检");
-        addCardBody(card, "直接向相册发起一次 ping，确认模块是否已在 LSPosed 中生效、"
-                + "本地 OCR 引擎是否就绪（不截屏、不耗时）。");
-
-        Button btn = new Button(this);
-        btn.setText("检测模块状态");
-        btn.setAllCaps(false);
-        btn.setTextColor(0xFFFFFFFF);
-        btn.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(accent);
-        bg.setCornerRadius(dp(10));
-        btn.setBackground(bg);
-        btn.setMinHeight(0);
-        btn.setMinimumHeight(0);
-        btn.setPadding(dp(16), dp(8), dp(16), dp(8));
-        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        blp.topMargin = dp(10);
-        btn.setLayoutParams(blp);
-
-        TextView result = new TextView(this);
-        result.setText("尚未检测");
-        result.setTextColor(subColor);
-        result.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
-        result.setLineSpacing(dp(2), 1f);
-        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-        rlp.topMargin = dp(10);
-        result.setLayoutParams(rlp);
-
-        btn.setOnClickListener(v -> runSelfCheck(result));
-        card.addView(btn);
-        card.addView(result);
-        container.addView(card);
-    }
-
-    private void runSelfCheck(TextView out) {
-        out.setTextColor(bodyColor);
-        out.setText("正在检测…");
-        new Thread(() -> {
-            String msg;
-            try {
-                Bundle r = getContentResolver().call(
-                        Uri.parse(URI_CALL), "ping", null, new Bundle());
-                if (r == null) {
-                    msg = "✗ 未生效：相册没有返回自检结果。\n"
-                            + "请确认 LSPosed 已启用本模块、作用域勾选了「系统相册」，并重启手机。";
-                } else if (r.getBoolean("success", false)) {
-                    msg = "✓ 模块已生效\n" + r.getString("text", "");
-                } else {
-                    msg = "✗ " + r.getString("error", "未知错误");
-                }
-            } catch (Throwable t) {
-                msg = "✗ 调用失败：" + t
-                        + "\n请确认已安装小米相册、模块已启用并重启手机。";
-            }
-            final String result = msg;
-            runOnUiThread(() -> {
-                out.setText(result);
-                out.setTextColor(result.startsWith("✓") ? accent : bodyColor);
-            });
-        }, "GalleryOCR-Check").start();
     }
 
     private void addCard(String title, String body) {

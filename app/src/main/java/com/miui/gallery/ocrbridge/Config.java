@@ -17,9 +17,9 @@ package com.miui.gallery.ocrbridge;
  * 两个 App 不同进程，相册的 libmiocr.so 与 OCREngine 是私有的，FV 无法直接加载。
  * 所以：相册进程做服务端（content call），FV 进程做客户端（跨进程送 Bitmap）。
  *
- * 正式版 v2.0.0 只保留真机日志确认命中的链路：
+ * 正式版只保留真机日志确认命中的链路（v2.0.1 仅调整界面入口，链路不变）：
  *   extract_bitmap（FV 桥接，主链路）/ extract_screen_text + 内存管道（shell 主命令）
- *   / extract_image_text（兜底）/ ping（自检）/ 广播（对外异步入口）
+ *   / extract_image_text（兜底）/ ping（引擎状态）/ 广播（对外异步入口）
  */
 final class Config {
     static final String TAG = "GalleryOCR";

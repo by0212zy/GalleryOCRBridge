@@ -5,7 +5,18 @@ Hook 小米相册的**本地 OCR 引擎**，做两件事：
 1. 把「提取当前屏幕文字」做成一条 shell 命令，供其它 App / Tasker / Termux / adb 调用；
 2. 让 **FV 悬浮球**的「自动文字识别」无感改走小米相册 OCR，不用下载它自带的百度语言包、不用给它截屏权限、零临时文件。
 
-基于 [libxposed 现代 API 102](https://github.com/libxposed/api) 的 LSPosed 模块。**内置说明界面**（桌面图标「相册文字提取桥」），不修改系统属性、不改 Settings 数据库、不联网、不打包任何第三方 OCR / so / 模型。作用域勾选两个：`com.miui.gallery`（系统相册）+ `com.fooview.android.fooview`（FV 悬浮球）。
+基于 [libxposed 现代 API 102](https://github.com/libxposed/api) 的 LSPosed 模块。**内置说明界面**（在 LSPosed 模块页点「启动」打开，**不占桌面图标**），不修改系统属性、不改 Settings 数据库、不联网、不打包任何第三方 OCR / so / 模型。作用域勾选两个：`com.miui.gallery`（系统相册）+ `com.fooview.android.fooview`（FV 悬浮球）。
+
+---
+
+## v2.0.1 调整
+
+正式版收尾，功能链路完全不变，只做两处精简：
+
+- **去掉桌面启动图标**：Manifest 不再声明 `LAUNCHER`，桌面不会多出一个图标。说明界面改用 Xposed 生态惯例的 `de.robv.android.xposed.category.MODULE_SETTINGS` 入口，**在 LSPosed → 模块 → 长按本模块 →「启动」打开**（LSPosed 的「启动」菜单优先查这个 category 并显式启动组件，与有没有桌面图标无关）。
+- **去掉界面里的「运行自检」按钮**：不再从模块自身进程发起 `ping`。排查请直接执行下面的 `ping` 命令（对外接口保留不变）。
+
+> 这两处只影响模块 App 自身的入口与界面；相册 / FV 进程里的全部 Hook、shell 命令、广播与 FV 接管链路**完全不变**。
 
 ---
 
@@ -13,11 +24,10 @@ Hook 小米相册的**本地 OCR 引擎**，做两件事：
 
 ### 新增：说明界面
 
-打开桌面图标即可看到完整的模块说明：
+打开说明界面即可看到完整的模块说明：
 
 - 模块功能、使用前提、返回字段、FV 接管说明、排查方式；
 - **全部 shell 命令一键复制**（也支持长按选中）；
-- **「运行自检」按钮**：直接向相册发起一次 `ping`，确认模块是否已在 LSPosed 生效、本地 OCR 引擎是否就绪；
 - 深浅色自适应，纯 framework API，界面只运行在模块自身进程，**与相册 / FV 进程里的 Hook 完全隔离**。
 
 命令同时写进了 LSPosed 模块描述（模块列表里可直接看到）和本 README。
@@ -68,7 +78,7 @@ shell: screencap -p → PNG 字节 → content write (pipe) → 相册进程内�
 
 ---
 
-## Shell 命令（可直接复制；App 内也可一键复制）
+## Shell 命令（可直接复制；说明界面内也可一键复制）
 
 ### ① 主命令 · 提取当前屏幕文字，同步返回
 
@@ -107,7 +117,7 @@ screencap -p /sdcard/Pictures/.ocr_tmp.png && content call --uri content://com.m
 content call --uri content://com.miui.gallery.widget --method extract_image_text --extra path:s:/sdcard/Pictures/a.png
 ```
 
-### ④ 自检（不截屏，只看 OCR 引擎是否就绪）
+### ④ 查看 OCR 引擎状态（不截屏）
 
 ```sh
 content call --uri content://com.miui.gallery.widget --method ping
@@ -117,7 +127,7 @@ content call --uri content://com.miui.gallery.widget --method ping
 Bundle[{text=engine=OK, ocrSoLoaded=true, sdk=35, abi=arm64-v8a, success=true, source=ping}]
 ```
 
-`ocrSoLoaded=false` 说明本地 OCR 的 so 没加载成功，见「前提与排查」。App 内的「运行自检」按钮等价于这条命令。
+`ocrSoLoaded=false` 说明本地 OCR 的 so 没加载成功，见「前提与排查」。
 
 ### ⑤ 广播 · 异步（Tasker / MacroDroid / 其它 App）
 
@@ -245,7 +255,7 @@ content call --uri content://com.miui.gallery.widget --method extract_screen_tex
 ## 前提与排查
 
 1. **LSPosed 作用域勾选「系统相册 / 小米相册」`com.miui.gallery`**；要用 FV 自动识别接管再勾上 **FV 悬浮球 `com.fooview.android.fooview`**。启用模块后**重启手机**（或至少强停相册 / FV 悬浮球）。只用 shell 命令的话勾相册一个就够。
-2. **建议先在相册里成功用过一次「提取文字」**，确保本地 OCR 的 so / 模型就绪。`ping` 显示 `ocrSoLoaded=true`，或 App 内「运行自检」显示「模块已生效」即可。
+2. **建议先在相册里成功用过一次「提取文字」**，确保本地 OCR 的 so / 模型就绪。执行 `ping` 显示 `ocrSoLoaded=true` 即可。
 3. **`screencap` 权限**：adb shell / 系统 shell 下直接可用；Termux 需 root 并改用 `su -c 'screencap -p'`。
 4. **全链路都有日志**，LSPosed 日志筛 `GalleryOCR` 或 `adb logcat -s GalleryOCR`：
    ```
@@ -273,7 +283,7 @@ content call --uri content://com.miui.gallery.widget --method extract_screen_tex
 - OCR 完全靠反射调用相册自带 `OCREngine`，不打包任何第三方 OCR / so / 模型。因为运行在相册进程，宿主的 `libmiocr.so` 天然可被 `System.loadLibrary` 找到。
 - 跨进程 Bitmap 走 Binder `Parcelable` + ashmem（不受 1MB 事务限制）；`HARDWARE` / mutable Bitmap 会先转成 `ARGB_8888` 只读副本再送进 native 层。
 - 广播接收器是动态注册的 exported Receiver（Android 13+ 用 `RECEIVER_EXPORTED`），延后到应用就绪后注册，避免早期触发宿主 `<clinit>`。
-- 说明界面 `MainActivity` 是普通 Activity（无第三方 UI 依赖），只在模块自身进程运行，不参与 Hook。
+- 说明界面 `MainActivity` 是普通 Activity（无第三方 UI 依赖），只在模块自身进程运行，不参与 Hook。清单不声明 `LAUNCHER`（桌面无图标），改由 `de.robv.android.xposed.category.MODULE_SETTINGS` 交给 LSPosed 模块页「启动」打开。
 
 ## 构建
 
