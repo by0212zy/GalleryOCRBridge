@@ -1,10 +1,58 @@
 # GalleryOCRBridge
 
-Hook 小米相册的**本地 OCR 引擎**，把「提取当前屏幕文字」做成一条 shell 命令，供其它 App 调用。
+Hook 小米相册的**本地 OCR 引擎**，做两件事：
 
-基于 [libxposed 现代 API 102](https://github.com/libxposed/api)，LSPosed 模块，无界面、无启动图标。作用域只勾选 `com.miui.gallery`，不修改系统属性、不改 Settings 数据库、不 Hook 其它应用。
+1. 把「提取当前屏幕文字」做成一条 shell 命令，供其它 App 调用；
+2. **v1.2.0 新增**：让 FV 悬浮球的「自动文字识别」无感改走小米相册 OCR，不用下载它自带的百度语言包、不用给它截屏权限、零临时文件。
+
+基于 [libxposed 现代 API 102](https://github.com/libxposed/api)，LSPosed 模块，无界面、无启动图标。不修改系统属性、不改 Settings 数据库。**作用域勾选两个**：`com.miui.gallery`（系统相册）+ `com.fooview.android.fooview`（FV 悬浮球）。
 
 > **v1.1.0 重要修复**：v1.0.0 让相册 app 进程自己截屏，但普通 app 进程没有 `READ_FRAME_BUFFER`，截屏被 SurfaceFlinger 拒绝；`su` 从 app 进程提权又会卡在 Magisk 授权，命令会挂 20 秒后无输出。现在改为**由 shell 进程截屏**（shell uid 天然有截屏权限），PNG 通过内存管道直接送进相册进程，仍然零临时文件、不需要 root 提权。
+
+---
+
+## v1.2.0：FV 悬浮球「自动文字识别」改用小米相册 OCR
+
+### 先回答：能直接调用小米相册的识别库吗？
+
+**不能直接调用，但能无感用上，效果一样。**
+
+反编译 FV 悬浮球 1.6.4 与小米相册 4.3.1.13 后确认，两边是**两个不同 App、两套不同进程、两个私有引擎**：
+
+| | FV 悬浮球 | 小米相册 |
+| --- | --- | --- |
+| 引擎 | 百度 PaddleLite（`BaiduOCREngine`） | 小米自研 `libmiocr.so`（`OCREngine`） |
+| 数据 | `ch_ppocr_mobile_v2.0_*.nb` 模型 + **要下载语言包** | so / 模型随相册内置，**开箱即用** |
+| 入口 | `z1/e.recognize(Bitmap) → String` | `OCREngine.doOCR(Bitmap) → total_text` |
+| 进程 | `com.fooview.android.fooview`（识别在 `:circle`） | `com.miui.gallery` |
+
+小米相册的 `libmiocr.so` 和 `OCREngine` 类是**相册私有**的，装在相册的 dex / nativeLibraryDir 里，FV 进程既加载不到类、也 `loadLibrary` 不到 so。所以"直接调库"做不到。
+
+但两个引擎的**接口形状完全一致**：都是吃一个内存 `Bitmap`、吐一段纯文本。于是本模块在中间架了一座桥：
+
+```
+FV 自动文字识别（用户已授权的 MediaProjection 截图，现成 Bitmap）
+        │  Hook BaiduOCREngine.recognize(Bitmap) / z1-c.recognize(Bitmap)
+        ▼  把 Bitmap 跨进程送进相册（Binder ashmem，一次调用）
+小米相册 OCREngine.doOCR(Bitmap) → total_text
+        ▼  文本作为 recognize() 的返回值交回 FV
+FV 照常显示 / 复制 / 搜索 / 分享 / 翻译，全程无感
+```
+
+**好处**：FV 不再需要下载百度语言包（连"语言包未下载时空壳返回 null"的 `z1/c` 也一起接管）；不用 `screencap` 权限、不用 root、**不产生任何临时图片文件**——因为 FV 自己已经把屏幕截成 Bitmap 了，我们只是把它转交给相册。
+
+**三级保险，识别功能永不失效**：通道 A（Bundle 直传 Bitmap）→ 通道 B（`ocr_input` 内存管道）→ 都失败就 `chain.proceed()` 回退到 FV 自带 PaddleOCR。也就是相册没勾作用域 / 引擎没就绪 / 跨进程超时，FV 最多退回原来的行为，不会变坏。
+
+### 怎么用
+
+1. LSPosed 里给本模块**勾选两个作用域**：系统相册 `com.miui.gallery`、FV 悬浮球 `com.fooview.android.fooview`。
+2. 启用模块，**重启手机**（或至少强停相册 + FV 悬浮球）。
+3. 建议先在相册里成功用过一次「提取文字」，让本地 OCR so 就绪。
+4. 之后直接用 FV 原来的「自动文字识别 / 获取屏幕文字 / 识别图片中的文字」，出来的就是小米相册的识别结果，**不需要输入任何命令**。
+
+日志筛 `GalleryOCR`，看到 `FV 接管成功，小米相册 OCR 文本长度=NN` 即表示走的相册引擎；看到 `FV 桥接...回退本地 OCR` 说明桥接没成功（多半是两个作用域没勾全），此时 FV 仍用自带引擎，功能不受影响。
+
+**只想用 shell、不想 Hook FV？** FV 自带「执行 Shell 命令，输出命令返回的信息」动作，新建一个动作把下面「主命令」填进去即可，零开发、不用升级。注意 FV 的 shell 是 app uid，需要 root 并用 `su -c 'screencap -p'`，详见下方主命令。而 **v1.2.0 的 Hook 方式不需要这些**——它用 FV 自己截好的 Bitmap。
 
 ---
 
@@ -106,9 +154,9 @@ content://com.miui.gallery.mediaeditor.authority
 | `success` | boolean | 是否成功 |
 | `text` | String | 识别出的全文（失败时为空串） |
 | `error` | String | 失败原因（仅失败时） |
-| `source` | String | `screen:pipe` / `screen:app` / `image:<路径>` / `ping` |
+| `source` | String | `screen:pipe` / `screen:app` / `image:<路径>` / `bitmap:app` / `ping` |
 
-`source=screen:pipe` 表示用的是主通道；`screen:app` 表示退回了相册进程内截屏（可能被权限拒绝）。
+`source=screen:pipe` 表示用的是主通道；`screen:app` 表示退回了相册进程内截屏（可能被权限拒绝）；`bitmap:app` 表示 Bitmap 由其它 App（如 FV 悬浮球）直接传入。
 
 ---
 
@@ -185,7 +233,7 @@ content call --uri content://com.miui.gallery.widget --method extract_screen_tex
 
 ## 前提与排查
 
-1. **LSPosed 作用域只勾选「系统相册 / 小米相册」`com.miui.gallery`**，启用模块后**重启手机**（或至少强停相册）。
+1. **LSPosed 作用域勾选「系统相册 / 小米相册」`com.miui.gallery`**；要用 FV 自动识别接管（v1.2.0）再勾上 **FV 悬浮球 `com.fooview.android.fooview`**。启用模块后**重启手机**（或至少强停相册 / FV 悬浮球）。只用 shell 命令的话勾相册一个就够。
 2. **建议先在相册里成功用过一次「提取文字」**，确保本地 OCR 的 so / 模型就绪。`ping` 显示 `ocrSoLoaded=true` 即可。
 3. **`screencap` 权限**：adb shell / 系统 shell 下直接可用；Termux 需 root 并改用 `su -c 'screencap -p'`。
 4. **v1.1.0 起全链路都有日志**，LSPosed 日志筛 `GalleryOCR` 就能看到每一步：
@@ -208,13 +256,14 @@ content call --uri content://com.miui.gallery.widget --method extract_screen_tex
 
 ## 技术原理
 
-- `META-INF/xposed/java_init.list` 声明入口 `com.miui.gallery.ocrbridge.ModuleMain`，`scope.list` 只写 `com.miui.gallery`，`staticScope=false`。
-- `onPackageReady` 时 Hook `android.content.ContentProvider` 的：
-  - `call()` 两个重载 → 命中 `extract_screen_text` / `extract_image_text` / `ping` 时同步返回结果 Bundle；
+- `META-INF/xposed/java_init.list` 声明入口 `com.miui.gallery.ocrbridge.ModuleMain`，`scope.list` 写 `com.miui.gallery` + `com.fooview.android.fooview`，`staticScope=false`。`onPackageReady` 按包名分流，两个进程互不干扰。
+- **相册进程（服务端）**：Hook `android.content.ContentProvider` 的：
+  - `call()` 两个重载 → 命中 `extract_screen_text` / `extract_image_text` / `extract_bitmap` / `ping` 时同步返回结果 Bundle；
   - `openFile()` / `openAssetFile()` → URI 含 `ocr_input` 时返回 `ParcelFileDescriptor.createPipe()` 的写端，读端由后台线程解码成 Bitmap 存内存。
   其余一律 `chain.proceed()`，不影响相册自身逻辑。
+- **FV 进程（客户端）**：Hook FV 里所有「`(Bitmap) → String`、非抽象」的 `recognize` 方法（含百度 `BaiduOCREngine` 与语言包未下载时的空壳 `z1/c`），把入参 Bitmap 跨进程交给相册 OCR，`total_text` 作为返回值。三级回退保证 FV 原功能不坏。
 - OCR 完全靠反射调用相册自带 `OCREngine`，不打包任何第三方 OCR / so / 模型，APK 仅 30 KB 左右。因为运行在相册进程，宿主的 `libmiocr.so` 天然可被 `System.loadLibrary` 找到。
-- `HARDWARE` Bitmap 会先转成 `ARGB_8888` 再送进 native 层，避免像素不可读。
+- 跨进程 Bitmap 走 Binder `Parcelable` + ashmem（不受 1MB 事务限制）；`HARDWARE` / mutable Bitmap 会先转成 `ARGB_8888` 只读副本再送进 native 层，避免像素不可读。
 - 广播接收器是动态注册的 exported Receiver（Android 13+ 用 `RECEIVER_EXPORTED`），延后到应用就绪之后注册，避免早期触发宿主 `<clinit>`。
 
 ## 构建

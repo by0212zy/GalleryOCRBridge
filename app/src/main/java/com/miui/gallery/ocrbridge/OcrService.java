@@ -3,6 +3,7 @@ package com.miui.gallery.ocrbridge;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.os.Build;
 import android.os.Bundle;
 import android.text.TextUtils;
 
@@ -41,6 +42,28 @@ final class OcrService {
                 }
                 source = "image:" + path;
                 Diag.s("已解码图片 " + path + " -> " + bm.getWidth() + "x" + bm.getHeight());
+            } else if (Config.METHOD_BITMAP.equals(method)) {
+                // FV 悬浮球桥接：对方进程把已经截好的 Bitmap 放进 Bundle 直接送来。
+                // Bitmap 是 framework Parcelable，跨 Binder 走 ashmem，不受 1MB 事务限制。
+                Object o = extras == null ? null : extras.getParcelable(Config.EXTRA_BITMAP);
+                if (!(o instanceof Bitmap)) {
+                    throw new IllegalArgumentException("Bundle 里没有 Bitmap（key=" + Config.EXTRA_BITMAP + "）");
+                }
+                bm = (Bitmap) o;
+                if (bm.isRecycled()) {
+                    throw new IllegalStateException("传入的 Bitmap 已被回收");
+                }
+                if (Build.VERSION.SDK_INT >= 26 && bm.getConfig() == Bitmap.Config.HARDWARE) {
+                    // HARDWARE Bitmap 像素不可读，native OCR 会失败，先转软件副本
+                    Bitmap soft = bm.copy(Bitmap.Config.ARGB_8888, false);
+                    if (soft == null) {
+                        throw new IllegalStateException("HARDWARE Bitmap 转换失败");
+                    }
+                    bm = soft;
+                }
+                source = "bitmap:app";
+                Diag.s("收到 App 传入的 Bitmap " + bm.getWidth() + "x" + bm.getHeight()
+                        + " config=" + bm.getConfig());
             } else {
                 // 优先用 shell 端通过内存管道送进来的截图（零文件、无需 root）
                 bm = ScreenInput.take(Config.INPUT_WAIT_MS);

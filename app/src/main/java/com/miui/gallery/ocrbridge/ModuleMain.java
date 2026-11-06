@@ -13,10 +13,14 @@ import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam;
 /**
  * 模块入口（META-INF/xposed/java_init.list）。
  *
- * 作用域只有 com.miui.gallery：模块只在相册进程里生效，不碰系统属性、
- * 不改 Settings 数据库、不 Hook 其它 App。两条 shell 入口都注册在相册进程内：
- *   - ProviderCallHook：content call 同步返回识别文本（主入口）
- *   - BroadcastTrigger：am broadcast 异步触发（备用 / 其它 App 集成）
+ * v1.2.0 起一个模块管两个作用域，按包名分流：
+ *   com.miui.gallery            （服务端）ProviderCallHook + BroadcastTrigger
+ *                                把相册自带本地 OCR 暴露成 content call / 广播。
+ *   com.fooview.android.fooview（客户端）FvOcrHook
+ *                                把 FV 悬浮球「自动文字识别」的 Bitmap 转发给相册，
+ *                                取回文本作为 recognize() 的返回值。
+ *
+ * 不修改系统属性、不改 Settings 数据库、不 Hook 其它 App。
  */
 public class ModuleMain extends XposedModule {
 
@@ -51,11 +55,18 @@ public class ModuleMain extends XposedModule {
 
         Diag.i(this, "onPackageReady 进程=" + proc + " 包=" + pkg);
         try {
-            // 主入口：所有进程都装，Provider 可能落在任意进程
-            ProviderCallHook.install(this, loader, pkg);
-            // 备用入口：只在主进程注册，避免一条广播被多个子进程重复触发
-            if (!proc.contains(":")) {
-                BroadcastTrigger.install(this, pkg);
+            if (Config.FV_PKG.equals(pkg)) {
+                // FV 悬浮球（含 :circle 子进程）：只装客户端 Hook，不碰它的 Provider
+                FvOcrHook.install(this, loader, pkg);
+            } else if (Config.TARGET_PKG.equals(pkg)) {
+                // 小米相册（含 :remote 等子进程）：装服务端 Hook
+                ProviderCallHook.install(this, loader, pkg);
+                // 广播接收器只在主进程注册，避免一条广播被多个子进程重复触发
+                if (!proc.contains(":")) {
+                    BroadcastTrigger.install(this, pkg);
+                }
+            } else {
+                Diag.i(this, "非目标包，跳过: " + pkg);
             }
         } catch (Throwable t) {
             Diag.e(this, "安装 Hook 失败: " + pkg + "/" + proc, t);
